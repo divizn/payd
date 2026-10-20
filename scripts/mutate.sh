@@ -3,8 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 runs=${RUNS:-20}
+[ $# -eq 0 ] && set -- mutations/*.patch
 
-for patch in mutations/*.patch; do
+for patch in "$@"; do
 	git apply "$patch"
 	trap 'git apply -R "$patch"' EXIT
 	out=$(go test -race -count="$runs" -v ./... 2>&1 || true)
