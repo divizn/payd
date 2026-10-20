@@ -7,7 +7,7 @@ runs=${RUNS:-20}
 for patch in mutations/*.patch; do
 	git apply "$patch"
 	trap 'git apply -R "$patch"' EXIT
-	out=$(go test -race -count="$runs" -v ./internal/server 2>&1 || true)
+	out=$(go test -race -count="$runs" -v ./... 2>&1 || true)
 	git apply -R "$patch"
 	trap - EXIT
 	if grep -q '\[build failed\]' <<<"$out"; then

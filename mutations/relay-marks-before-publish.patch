@@ -1,0 +1,25 @@
+--- a/internal/outbox/outbox.go
++++ b/internal/outbox/outbox.go
+@@ -71,13 +71,18 @@
+ 	}
+ 	ids := make([]int64, len(events))
+ 	for i, e := range events {
+-		if err := r.Publish(ctx, e); err != nil {
+-			return 0, err
+-		}
+ 		ids[i] = e.ID
+ 	}
+ 	if _, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at = now() WHERE id = ANY($1)`, ids); err != nil {
+ 		return 0, err
+ 	}
+-	return len(events), tx.Commit(ctx)
++	if err := tx.Commit(ctx); err != nil {
++		return 0, err
++	}
++	for _, e := range events {
++		if err := r.Publish(ctx, e); err != nil {
++			return 0, err
++		}
++	}
++	return len(events), nil
+ }
