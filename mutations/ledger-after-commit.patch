@@ -1,6 +1,8 @@
+diff --git a/internal/server/idempotency.go b/internal/server/idempotency.go
+index 41a5b13..56bffd1 100644
 --- a/internal/server/idempotency.go
 +++ b/internal/server/idempotency.go
-@@ -15,6 +15,8 @@
+@@ -16,6 +16,8 @@ import (
  
  const maxBody = 1 << 20
  
@@ -9,16 +11,16 @@
  type op func(ctx context.Context, tx pgx.Tx, merchant string, r *http.Request, body []byte) (int, any, error)
  
  func (s *Server) idempotent(fn op) http.HandlerFunc {
-@@ -74,6 +76,8 @@
+@@ -75,6 +77,8 @@ func (s *Server) idempotent(fn op) http.HandlerFunc {
  			return
  		}
  
 +		var after []func()
 +		ctx = context.WithValue(ctx, afterCommitKey{}, &after)
  		status, v, err := fn(ctx, tx, merchant, r, body)
- 		if err != nil {
- 			s.internalError(w, r, err)
-@@ -93,6 +97,9 @@
+ 		if errors.Is(err, acquirer.ErrUnavailable) {
+ 			writeError(w, http.StatusServiceUnavailable, "acquirer_unavailable", "acquirer unavailable, retry with the same Idempotency-Key")
+@@ -98,6 +102,9 @@ func (s *Server) idempotent(fn op) http.HandlerFunc {
  			s.internalError(w, r, err)
  			return
  		}
@@ -28,9 +30,11 @@
  		writeRaw(w, status, resp)
  	}
  }
+diff --git a/internal/server/server.go b/internal/server/server.go
+index 5f396c1..32dcf9f 100644
 --- a/internal/server/server.go
 +++ b/internal/server/server.go
-@@ -153,9 +153,9 @@
+@@ -172,9 +172,9 @@ func (s *Server) transition(apply func(ctx context.Context, p *payment.Payment,
  		}
  		merchantAccount := ledger.MerchantAccount(merchant)
  		if d := p.CapturedAmount - before.CapturedAmount; d > 0 {
