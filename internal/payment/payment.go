@@ -3,6 +3,7 @@ package payment
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 type Status string
@@ -29,6 +30,7 @@ type Payment struct {
 	Status         Status
 	CapturedAmount int64
 	RefundedAmount int64
+	CreatedAt      time.Time
 }
 
 func (p *Payment) illegal(op string) error {

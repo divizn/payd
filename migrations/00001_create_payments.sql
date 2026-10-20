@@ -4,7 +4,7 @@ CREATE TYPE payment_status AS ENUM (
 );
 
 CREATE TABLE payments (
-    id              uuid PRIMARY KEY,
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     merchant_id     text NOT NULL,
     amount          bigint NOT NULL CHECK (amount > 0),
     currency        char(3) NOT NULL,
