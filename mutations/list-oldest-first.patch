@@ -1,0 +1,11 @@
+--- a/internal/server/server.go
++++ b/internal/server/server.go
+@@ -198,7 +198,7 @@
+ 		}
+ 		limit = n
+ 	}
+-	rows, err := s.db.Query(r.Context(), `SELECT `+paymentCols+` FROM payments WHERE merchant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2`,
++	rows, err := s.db.Query(r.Context(), `SELECT `+paymentCols+` FROM payments WHERE merchant_id = $1 ORDER BY created_at, id LIMIT $2`,
+ 		merchantFrom(r.Context()), limit)
+ 	if err != nil {
+ 		s.internalError(w, r, err)
