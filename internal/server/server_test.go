@@ -14,8 +14,11 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/divizn/payd/internal/acquirer"
 	"github.com/divizn/payd/internal/ledger"
+	"github.com/divizn/payd/internal/payment"
 	"github.com/divizn/payd/internal/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -25,8 +28,10 @@ import (
 const racers = 50
 
 var (
-	db  *pgxpool.Pool
-	srv *httptest.Server
+	db         *pgxpool.Pool
+	srv        *httptest.Server
+	acq        = &scriptedAcquirer{fallback: &acquirer.Fake{}}
+	testPolicy = acquirer.Policy{Attempts: 3, Timeout: 100 * time.Millisecond, Backoff: 10 * time.Millisecond}
 )
 
 func TestMain(m *testing.M) {
@@ -35,13 +40,52 @@ func TestMain(m *testing.M) {
 		log.Fatal(err)
 	}
 	db = pool
-	srv = httptest.NewServer(New(db, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	srv = httptest.NewServer(New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), acq, testPolicy))
 	srv.Client().Transport.(*http.Transport).MaxIdleConnsPerHost = racers
 
 	code := m.Run()
 	srv.Close()
 	stop()
 	os.Exit(code)
+}
+
+type scriptedAcquirer struct {
+	fallback acquirer.Acquirer
+	mu       sync.Mutex
+	errs     map[string][]error
+	calls    map[string]int
+}
+
+func (a *scriptedAcquirer) fail(ref string, errs ...error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.errs == nil {
+		a.errs = map[string][]error{}
+	}
+	a.errs[ref] = append(a.errs[ref], errs...)
+}
+
+func (a *scriptedAcquirer) callsFor(ref string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls[ref]
+}
+
+func (a *scriptedAcquirer) Authorise(ctx context.Context, ref string, m payment.Money) (bool, error) {
+	a.mu.Lock()
+	if a.calls == nil {
+		a.calls = map[string]int{}
+	}
+	a.calls[ref]++
+	var err error
+	if q := a.errs[ref]; len(q) > 0 {
+		err, a.errs[ref] = q[0], q[1:]
+	}
+	a.mu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	return a.fallback.Authorise(ctx, ref, m)
 }
 
 type merchant struct {
@@ -300,5 +344,72 @@ func TestLedgerAndOutboxFollowEachCommittedChange(t *testing.T) {
 	want := []string{"payment.created", "payment.authorised", "payment.captured", "payment.partially_refunded", "payment.refunded"}
 	if fmt.Sprint(types) != fmt.Sprint(want) {
 		t.Fatalf("outbox events = %v, want %v", types, want)
+	}
+}
+
+func (m merchant) eventTypes(t *testing.T, paymentID string) []string {
+	t.Helper()
+	rows, err := db.Query(context.Background(), `SELECT type FROM outbox_events WHERE payment_id = $1 ORDER BY id`, paymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	types, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return types
+}
+
+func TestDeclinedAuthorisationFailsThePayment(t *testing.T) {
+	m := newMerchant(t)
+	p := m.payment(t, "/payments", uuid.NewString(), `{"amount":1051,"currency":"GBP"}`, http.StatusCreated)
+	if got := m.payment(t, "/payments/"+p.ID+"/authorise", uuid.NewString(), "", http.StatusOK); got.Status != "failed" {
+		t.Fatalf("status after decline = %s, want failed", got.Status)
+	}
+	if got := fmt.Sprint(m.eventTypes(t, p.ID)); got != "[payment.created payment.failed]" {
+		t.Fatalf("events = %s", got)
+	}
+	if r := m.do(t, http.MethodPost, "/payments/"+p.ID+"/capture", uuid.NewString(), ""); r.status != http.StatusConflict {
+		t.Fatalf("capture of failed payment = %d, want 409", r.status)
+	}
+}
+
+func TestAcquirerOutageLeavesTheKeyRetryable(t *testing.T) {
+	m := newMerchant(t)
+	p := m.payment(t, "/payments", uuid.NewString(), `{"amount":1000,"currency":"GBP"}`, http.StatusCreated)
+	acq.fail(p.ID, acquirer.ErrUnavailable, acquirer.ErrUnavailable, acquirer.ErrUnavailable)
+	path := "/payments/" + p.ID + "/authorise"
+	if r := m.do(t, http.MethodPost, path, "auth", ""); r.status != http.StatusServiceUnavailable {
+		t.Fatalf("authorise during outage = %d %s, want 503", r.status, r.body)
+	}
+	if got := fmt.Sprint(m.eventTypes(t, p.ID)); got != "[payment.created]" {
+		t.Fatalf("events after outage = %s, want only created", got)
+	}
+	first := m.do(t, http.MethodPost, path, "auth", "")
+	if first.status != http.StatusOK {
+		t.Fatalf("retry with same key = %d %s, want 200", first.status, first.body)
+	}
+	if again := m.do(t, http.MethodPost, path, "auth", ""); !bytes.Equal(again.body, first.body) {
+		t.Fatalf("replay differs: %s vs %s", again.body, first.body)
+	}
+	if n := acq.callsFor(p.ID); n != 4 {
+		t.Fatalf("acquirer called %d times, want 3 failed attempts and 1 success", n)
+	}
+}
+
+func TestConcurrentAuthorisesCallTheAcquirerOnce(t *testing.T) {
+	m := newMerchant(t)
+	p := m.payment(t, "/payments", uuid.NewString(), `{"amount":1000,"currency":"GBP"}`, http.StatusCreated)
+	ok := 0
+	var mu sync.Mutex
+	race(racers, func(i int) {
+		if r := m.do(t, http.MethodPost, "/payments/"+p.ID+"/authorise", fmt.Sprint("auth-", i), ""); r.status == http.StatusOK {
+			mu.Lock()
+			ok++
+			mu.Unlock()
+		}
+	})
+	if ok != 1 || acq.callsFor(p.ID) != 1 {
+		t.Fatalf("%d authorises succeeded and the acquirer was called %d times, want 1 and 1", ok, acq.callsFor(p.ID))
 	}
 }

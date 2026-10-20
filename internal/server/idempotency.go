@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/divizn/payd/internal/acquirer"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -75,6 +76,10 @@ func (s *Server) idempotent(fn op) http.HandlerFunc {
 		}
 
 		status, v, err := fn(ctx, tx, merchant, r, body)
+		if errors.Is(err, acquirer.ErrUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "acquirer_unavailable", "acquirer unavailable, retry with the same Idempotency-Key")
+			return
+		}
 		if err != nil {
 			s.internalError(w, r, err)
 			return

@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/divizn/payd/internal/acquirer"
 	"github.com/divizn/payd/internal/outbox"
 	"github.com/divizn/payd/internal/server"
 	"github.com/divizn/payd/migrations"
@@ -57,7 +59,18 @@ func run(log *slog.Logger) error {
 	if addr == "" {
 		addr = ":8080"
 	}
-	srv := &http.Server{Addr: addr, Handler: server.New(db, log), ReadHeaderTimeout: 5 * time.Second}
+	acq := &acquirer.Fake{}
+	if acq.Latency, err = envDuration("ACQUIRER_LATENCY"); err != nil {
+		return err
+	}
+	if acq.ErrorRate, err = envFloat("ACQUIRER_ERROR_RATE"); err != nil {
+		return err
+	}
+	if acq.TimeoutRate, err = envFloat("ACQUIRER_TIMEOUT_RATE"); err != nil {
+		return err
+	}
+	policy := acquirer.Policy{Attempts: 3, Timeout: 500 * time.Millisecond, Backoff: 50 * time.Millisecond}
+	srv := &http.Server{Addr: addr, Handler: server.New(db, log, acq, policy), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -69,4 +82,20 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	return nil
+}
+
+func envDuration(name string) (time.Duration, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(v)
+}
+
+func envFloat(name string) (float64, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0, nil
+	}
+	return strconv.ParseFloat(v, 64)
 }

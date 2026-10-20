@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/divizn/payd/internal/acquirer"
 	"github.com/divizn/payd/internal/ledger"
 	"github.com/divizn/payd/internal/outbox"
 	"github.com/divizn/payd/internal/payment"
@@ -19,23 +20,25 @@ import (
 )
 
 type Server struct {
-	db  *pgxpool.Pool
-	log *slog.Logger
+	db     *pgxpool.Pool
+	log    *slog.Logger
+	acq    acquirer.Acquirer
+	policy acquirer.Policy
 }
 
-func New(db *pgxpool.Pool, log *slog.Logger) http.Handler {
-	s := &Server{db: db, log: log}
+func New(db *pgxpool.Pool, log *slog.Logger, acq acquirer.Acquirer, policy acquirer.Policy) http.Handler {
+	s := &Server{db: db, log: log, acq: acq, policy: policy}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /payments", s.idempotent(s.create))
-	mux.HandleFunc("POST /payments/{id}/authorise", s.idempotent(s.transition(func(p *payment.Payment, _ *int64) error { return p.Authorise() })))
-	mux.HandleFunc("POST /payments/{id}/void", s.idempotent(s.transition(func(p *payment.Payment, _ *int64) error { return p.Void() })))
-	mux.HandleFunc("POST /payments/{id}/capture", s.idempotent(s.transition(func(p *payment.Payment, amount *int64) error {
+	mux.HandleFunc("POST /payments/{id}/authorise", s.idempotent(s.transition(s.authorise)))
+	mux.HandleFunc("POST /payments/{id}/void", s.idempotent(s.transition(func(_ context.Context, p *payment.Payment, _ *int64) error { return p.Void() })))
+	mux.HandleFunc("POST /payments/{id}/capture", s.idempotent(s.transition(func(_ context.Context, p *payment.Payment, amount *int64) error {
 		if amount == nil {
 			return p.Capture(p.Money.Amount)
 		}
 		return p.Capture(*amount)
 	})))
-	mux.HandleFunc("POST /payments/{id}/refund", s.idempotent(s.transition(func(p *payment.Payment, amount *int64) error {
+	mux.HandleFunc("POST /payments/{id}/refund", s.idempotent(s.transition(func(_ context.Context, p *payment.Payment, amount *int64) error {
 		if amount == nil {
 			return p.Refund(p.CapturedAmount - p.RefundedAmount)
 		}
@@ -119,7 +122,21 @@ func (s *Server) create(ctx context.Context, tx pgx.Tx, merchant string, _ *http
 	return http.StatusCreated, toJSON(p), nil
 }
 
-func (s *Server) transition(apply func(p *payment.Payment, amount *int64) error) op {
+func (s *Server) authorise(ctx context.Context, p *payment.Payment, _ *int64) error {
+	if p.Status != payment.StatusCreated {
+		return p.Authorise()
+	}
+	approved, err := acquirer.Authorise(ctx, s.acq, s.policy, p.ID, p.Money)
+	if err != nil {
+		return err
+	}
+	if approved {
+		return p.Authorise()
+	}
+	return p.Fail()
+}
+
+func (s *Server) transition(apply func(ctx context.Context, p *payment.Payment, amount *int64) error) op {
 	return func(ctx context.Context, tx pgx.Tx, merchant string, r *http.Request, body []byte) (int, any, error) {
 		var req struct {
 			Amount *int64 `json:"amount"`
@@ -141,11 +158,13 @@ func (s *Server) transition(apply func(p *payment.Payment, amount *int64) error)
 			return 0, nil, err
 		}
 		before := *p
-		switch err := apply(p, req.Amount); {
+		switch err := apply(ctx, p, req.Amount); {
 		case errors.Is(err, payment.ErrIllegalTransition):
 			return errorBody(http.StatusConflict, "illegal_transition", err.Error())
-		case err != nil:
+		case errors.Is(err, payment.ErrInvalidAmount), errors.Is(err, payment.ErrExceedsAmount):
 			return errorBody(http.StatusUnprocessableEntity, "invalid_amount", err.Error())
+		case err != nil:
+			return 0, nil, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE payments SET status = $2, captured_amount = $3, refunded_amount = $4, updated_at = now() WHERE id = $1`,
 			id, p.Status, p.CapturedAmount, p.RefundedAmount); err != nil {
