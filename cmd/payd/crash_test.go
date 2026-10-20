@@ -97,6 +97,7 @@ func TestCrashKeepsLedgerAndOutboxConsistent(t *testing.T) {
 		cmd.Wait()
 		cmd = start()
 	}
+	time.Sleep(500 * time.Millisecond)
 	stopLoad()
 	wg.Wait()
 
