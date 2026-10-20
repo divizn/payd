@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -104,7 +105,7 @@ func (s *Server) create(ctx context.Context, tx pgx.Tx, merchant string, _ *http
 		Amount   int64  `json:"amount"`
 		Currency string `json:"currency"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decode(body, &req); err != nil {
 		return errorBody(http.StatusBadRequest, "invalid_json", err.Error())
 	}
 	m, err := payment.NewMoney(req.Amount, req.Currency)
@@ -139,15 +140,22 @@ func (s *Server) authorise(ctx context.Context, p *payment.Payment, _ *int64) er
 func (s *Server) transition(apply func(ctx context.Context, p *payment.Payment, amount *int64) error) op {
 	return func(ctx context.Context, tx pgx.Tx, merchant string, r *http.Request, body []byte) (int, any, error) {
 		var req struct {
-			Amount *int64 `json:"amount"`
+			Amount json.RawMessage `json:"amount"`
 		}
 		if len(body) > 0 {
-			if err := json.Unmarshal(body, &req); err != nil {
+			if err := decode(body, &req); err != nil {
 				return errorBody(http.StatusBadRequest, "invalid_json", err.Error())
 			}
 		}
-		id, err := uuid.Parse(r.PathValue("id"))
-		if err != nil {
+		var amount *int64
+		if len(req.Amount) > 0 {
+			amount = new(int64)
+			if err := json.Unmarshal(req.Amount, amount); err != nil || string(req.Amount) == "null" {
+				return errorBody(http.StatusUnprocessableEntity, "invalid_amount", "amount must be an integer, omit it for the default")
+			}
+		}
+		id, ok := parseID(r)
+		if !ok {
 			return errorBody(http.StatusNotFound, "not_found", "payment not found")
 		}
 		p, err := scanPayment(tx.QueryRow(ctx, `SELECT `+paymentCols+` FROM payments WHERE id = $1 AND merchant_id = $2 FOR UPDATE`, id, merchant))
@@ -158,7 +166,7 @@ func (s *Server) transition(apply func(ctx context.Context, p *payment.Payment, 
 			return 0, nil, err
 		}
 		before := *p
-		switch err := apply(ctx, p, req.Amount); {
+		switch err := apply(ctx, p, amount); {
 		case errors.Is(err, payment.ErrIllegalTransition):
 			return errorBody(http.StatusConflict, "illegal_transition", err.Error())
 		case errors.Is(err, payment.ErrInvalidAmount), errors.Is(err, payment.ErrExceedsAmount):
@@ -189,8 +197,8 @@ func (s *Server) transition(apply func(ctx context.Context, p *payment.Payment, 
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(r.PathValue("id"))
-	if err != nil {
+	id, ok := parseID(r)
+	if !ok {
 		writeError(w, http.StatusNotFound, "not_found", "payment not found")
 		return
 	}
@@ -237,6 +245,25 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": out})
+}
+
+// canonical lowercase form only, so each payment has one path
+func parseID(r *http.Request) (uuid.UUID, bool) {
+	v := r.PathValue("id")
+	id, err := uuid.Parse(v)
+	return id, err == nil && id.String() == v
+}
+
+func decode(body []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("unexpected data after the JSON value")
+	}
+	return nil
 }
 
 type apiError struct {

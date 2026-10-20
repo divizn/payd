@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/divizn/payd/internal/acquirer"
 	"github.com/jackc/pgx/v5"
@@ -23,13 +24,18 @@ func (s *Server) idempotent(fn op) http.HandlerFunc {
 		ctx := r.Context()
 		merchant := merchantFrom(ctx)
 		key := r.Header.Get("Idempotency-Key")
-		if key == "" || len(key) > 255 {
-			writeError(w, http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key header must be 1 to 255 characters")
+		if key == "" || len(key) > 255 || !utf8.ValidString(key) {
+			writeError(w, http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key header must be 1 to 255 bytes of UTF-8")
 			return
 		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
-		if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", "request body over 1MiB")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "unreadable_body", err.Error())
 			return
 		}
 		h := sha256.New()
