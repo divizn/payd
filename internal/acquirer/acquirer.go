@@ -39,7 +39,7 @@ func Authorise(ctx context.Context, a Acquirer, p Policy, ref string, m payment.
 		if !errors.Is(err, ErrUnavailable) && !errors.Is(err, context.DeadlineExceeded) {
 			return false, err
 		}
-		if attempt == p.Attempts {
+		if attempt >= p.Attempts {
 			return false, ErrUnavailable
 		}
 		select {
