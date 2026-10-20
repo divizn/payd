@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/divizn/payd/internal/outbox"
 	"github.com/divizn/payd/internal/server"
 	"github.com/divizn/payd/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 )
 
 func main() {
@@ -35,13 +35,23 @@ func run(log *slog.Logger) error {
 	}
 	defer db.Close()
 
-	goose.SetBaseFS(migrations.FS)
-	if err := goose.SetDialect("postgres"); err != nil {
+	if err := migrations.Up(ctx, stdlib.OpenDBFromPool(db)); err != nil {
 		return err
 	}
-	if err := goose.UpContext(ctx, stdlib.OpenDBFromPool(db), "."); err != nil {
-		return err
-	}
+
+	relay := outbox.Relay{DB: db, Interval: 100 * time.Millisecond, Log: log, Publish: func(ctx context.Context, e outbox.Event) error {
+		log.InfoContext(ctx, "event published", "event", e)
+		return nil
+	}}
+	relayDone := make(chan struct{})
+	go func() {
+		relay.Run(ctx)
+		close(relayDone)
+	}()
+	defer func() {
+		stop()
+		<-relayDone
+	}()
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {

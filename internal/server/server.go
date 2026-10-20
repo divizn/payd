@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/divizn/payd/internal/ledger"
+	"github.com/divizn/payd/internal/outbox"
 	"github.com/divizn/payd/internal/payment"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -111,6 +113,9 @@ func (s *Server) create(ctx context.Context, tx pgx.Tx, merchant string, _ *http
 	if err != nil {
 		return 0, nil, err
 	}
+	if err := outbox.Enqueue(ctx, tx, p.ID, "payment."+string(p.Status), toJSON(p)); err != nil {
+		return 0, nil, err
+	}
 	return http.StatusCreated, toJSON(p), nil
 }
 
@@ -135,6 +140,7 @@ func (s *Server) transition(apply func(p *payment.Payment, amount *int64) error)
 		if err != nil {
 			return 0, nil, err
 		}
+		before := *p
 		switch err := apply(p, req.Amount); {
 		case errors.Is(err, payment.ErrIllegalTransition):
 			return errorBody(http.StatusConflict, "illegal_transition", err.Error())
@@ -143,6 +149,20 @@ func (s *Server) transition(apply func(p *payment.Payment, amount *int64) error)
 		}
 		if _, err := tx.Exec(ctx, `UPDATE payments SET status = $2, captured_amount = $3, refunded_amount = $4, updated_at = now() WHERE id = $1`,
 			id, p.Status, p.CapturedAmount, p.RefundedAmount); err != nil {
+			return 0, nil, err
+		}
+		merchantAccount := ledger.MerchantAccount(merchant)
+		if d := p.CapturedAmount - before.CapturedAmount; d > 0 {
+			if err := ledger.Post(ctx, tx, p.ID, ledger.Acquirer, merchantAccount, d, p.Money.Currency); err != nil {
+				return 0, nil, err
+			}
+		}
+		if d := p.RefundedAmount - before.RefundedAmount; d > 0 {
+			if err := ledger.Post(ctx, tx, p.ID, merchantAccount, ledger.Acquirer, d, p.Money.Currency); err != nil {
+				return 0, nil, err
+			}
+		}
+		if err := outbox.Enqueue(ctx, tx, p.ID, "payment."+string(p.Status), toJSON(p)); err != nil {
 			return 0, nil, err
 		}
 		return http.StatusOK, toJSON(p), nil

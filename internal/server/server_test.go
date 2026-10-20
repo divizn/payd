@@ -15,12 +15,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/divizn/payd/migrations"
+	"github.com/divizn/payd/internal/ledger"
+	"github.com/divizn/payd/internal/pgtest"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
 const racers = 50
@@ -31,33 +30,17 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	ctx := context.Background()
-	pg, err := postgres.Run(ctx, "postgres:16-alpine", postgres.BasicWaitStrategies())
+	_, pool, stop, err := pgtest.Start(context.Background(), racers+10)
 	if err != nil {
 		log.Fatal(err)
 	}
-	dsn, err := pg.ConnectionString(ctx, "sslmode=disable", fmt.Sprintf("pool_max_conns=%d", racers+10))
-	if err != nil {
-		log.Fatal(err)
-	}
-	if db, err = pgxpool.New(ctx, dsn); err != nil {
-		log.Fatal(err)
-	}
-	goose.SetBaseFS(migrations.FS)
-	goose.SetLogger(goose.NopLogger())
-	if err := goose.SetDialect("postgres"); err != nil {
-		log.Fatal(err)
-	}
-	if err := goose.UpContext(ctx, stdlib.OpenDBFromPool(db), "."); err != nil {
-		log.Fatal(err)
-	}
+	db = pool
 	srv = httptest.NewServer(New(db, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	srv.Client().Transport.(*http.Transport).MaxIdleConnsPerHost = racers
 
 	code := m.Run()
 	srv.Close()
-	db.Close()
-	pg.Terminate(ctx)
+	stop()
 	os.Exit(code)
 }
 
@@ -281,5 +264,41 @@ func TestMerchantsAreIsolated(t *testing.T) {
 	}
 	if r := other.do(t, http.MethodGet, "/payments", "", ""); !bytes.Contains(r.body, []byte(`"data":[]`)) {
 		t.Errorf("other merchant list = %s, want empty", r.body)
+	}
+}
+
+func TestLedgerAndOutboxFollowEachCommittedChange(t *testing.T) {
+	m := newMerchant(t)
+	p := m.authorised(t, 1000)
+	base := "/payments/" + p.ID
+	m.payment(t, base+"/capture", uuid.NewString(), `{"amount":600}`, http.StatusOK)
+	m.payment(t, base+"/refund", uuid.NewString(), `{"amount":100}`, http.StatusOK)
+	if r := m.do(t, http.MethodPost, base+"/capture", uuid.NewString(), ""); r.status != http.StatusConflict {
+		t.Fatalf("capture after refund = %d %s, want 409", r.status, r.body)
+	}
+	m.payment(t, base+"/refund", uuid.NewString(), "", http.StatusOK)
+
+	ctx := context.Background()
+	if err := ledger.Check(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var balance int64
+	if err := db.QueryRow(ctx, `SELECT sum(amount) FROM ledger_entries WHERE payment_id = $1 AND account = $2`, p.ID, ledger.MerchantAccount(m.id)).Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if balance != 0 {
+		t.Fatalf("merchant balance after full refund = %d, want 0", balance)
+	}
+	rows, err := db.Query(ctx, `SELECT type FROM outbox_events WHERE payment_id = $1 ORDER BY id`, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	types, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"payment.created", "payment.authorised", "payment.captured", "payment.partially_refunded", "payment.refunded"}
+	if fmt.Sprint(types) != fmt.Sprint(want) {
+		t.Fatalf("outbox events = %v, want %v", types, want)
 	}
 }
