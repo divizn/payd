@@ -214,7 +214,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toJSON(p))
 }
 
-// ponytail: limit only, add keyset pagination (created_at, id) when merchants page past 100
+// limit only, add keyset pagination (created_at, id) when merchants page past 100
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	limit := 20
 	if v := r.URL.Query().Get("limit"); v != "" {

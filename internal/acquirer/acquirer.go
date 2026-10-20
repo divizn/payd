@@ -59,7 +59,7 @@ type Fake struct {
 	Calls       atomic.Int64
 
 	mu sync.Mutex
-	// ponytail: unbounded, fine for a fake
+	// unbounded, fine for a fake
 	decisions map[string]bool
 }
 

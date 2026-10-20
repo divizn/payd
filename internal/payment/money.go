@@ -10,7 +10,7 @@ var (
 	ErrInvalidCurrency = errors.New("unsupported currency")
 )
 
-// ponytail: fixed currency list, swap for golang.org/x/text/currency if every ISO 4217 code is needed
+// fixed currency list, swap for golang.org/x/text/currency if every ISO 4217 code is needed
 var currencies = map[string]bool{
 	"GBP": true, "EUR": true, "USD": true, "JPY": true, "CHF": true,
 	"SEK": true, "NOK": true, "DKK": true, "PLN": true, "CAD": true, "AUD": true,
