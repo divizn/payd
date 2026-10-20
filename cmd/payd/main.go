@@ -70,17 +70,27 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	policy := acquirer.Policy{Attempts: 3, Timeout: 500 * time.Millisecond, Backoff: 50 * time.Millisecond}
-	srv := &http.Server{Addr: addr, Handler: server.New(db, log, acq, policy), ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           server.New(db, log, acq, policy),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	drained := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdown)
+		close(drained)
 	}()
 	log.Info("listening", "addr", addr)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-drained
 	return nil
 }
 
