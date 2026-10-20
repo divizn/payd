@@ -14,7 +14,8 @@ services:
   payd:
     build: .
     environment:
-      DATABASE_URL: postgres://payd:payd@postgres:5432/payd?sslmode=disable
+      DATABASE_URL: postgres://payd:payd@postgres:5432/payd?sslmode=disable&pool_max_conns=${PAYD_POOL_MAX_CONNS:-32}
+      ACQUIRER_LATENCY: ${ACQUIRER_LATENCY:-0s}
     ports:
       - "8080:8080"
     depends_on:
