@@ -1,0 +1,19 @@
+--- a/internal/acquirer/acquirer.go
++++ b/internal/acquirer/acquirer.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"math/rand/v2"
+ 	"sync"
+ 	"sync/atomic"
+@@ -28,7 +29,7 @@
+ 	backoff := p.Backoff
+ 	for attempt := 1; ; attempt++ {
+ 		actx, cancel := context.WithTimeout(ctx, p.Timeout)
+-		approved, err := a.Authorise(actx, ref, m)
++		approved, err := a.Authorise(actx, fmt.Sprint(ref, "-", attempt), m)
+ 		cancel()
+ 		if err == nil {
+ 			return approved, nil

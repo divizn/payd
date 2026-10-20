@@ -1,0 +1,11 @@
+--- a/internal/acquirer/acquirer.go
++++ b/internal/acquirer/acquirer.go
+@@ -27,7 +27,7 @@
+ func Authorise(ctx context.Context, a Acquirer, p Policy, ref string, m payment.Money) (bool, error) {
+ 	backoff := p.Backoff
+ 	for attempt := 1; ; attempt++ {
+-		actx, cancel := context.WithTimeout(ctx, p.Timeout)
++		actx, cancel := context.WithCancel(ctx)
+ 		approved, err := a.Authorise(actx, ref, m)
+ 		cancel()
+ 		if err == nil {

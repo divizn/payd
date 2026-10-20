@@ -67,7 +67,8 @@ func TestCrashKeepsLedgerAndOutboxConsistent(t *testing.T) {
 		var out bytes.Buffer
 		logs = append(logs, &out)
 		cmd := exec.Command(bin)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("DATABASE_URL=%s&pool_max_conns=%d", dsn, 2*(*crashWorkers)+4), "ADDR="+addr)
+		cmd.Env = append(os.Environ(), fmt.Sprintf("DATABASE_URL=%s&pool_max_conns=%d", dsn, 2*(*crashWorkers)+4), "ADDR="+addr,
+			"ACQUIRER_LATENCY=2ms", "ACQUIRER_ERROR_RATE=0.05", "ACQUIRER_TIMEOUT_RATE=0.02")
 		cmd.Stdout, cmd.Stderr = &out, &out
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
