@@ -17,5 +17,11 @@ for patch in "$@"; do
 		exit 1
 	fi
 	echo "$(basename "$patch" .patch):"
-	grep '^--- FAIL' <<<"$out" | awk '{print $3}' | sort | uniq -c | awk -v r="$runs" '{print "  failed " $1 "/" r "  " $2}' || echo "  not caught"
+	grep '^--- FAIL' <<<"$out" | awk '{print $3}' | sort | uniq -c | awk -v r="$runs" '{print "  failed " $1 "/" r "  " $2}' || true
+	if grep -qE '^panic: |^FAIL[[:space:]]+github' <<<"$out" && ! grep -q '^--- FAIL' <<<"$out"; then
+		echo "  package failed without a test failure (hang, panic or TestMain):"
+		grep -E '^panic: |^FAIL[[:space:]]+github' <<<"$out" | sort -u | sed 's/^/    /'
+	elif ! grep -q '^--- FAIL' <<<"$out"; then
+		echo "  not caught"
+	fi
 done

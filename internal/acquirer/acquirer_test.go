@@ -50,15 +50,13 @@ func TestGivesUpAfterTheLastAttempt(t *testing.T) {
 	}
 }
 
-func TestFakeReturnsTheFirstDecisionAfterALostReply(t *testing.T) {
-	f := &Fake{TimeoutRate: 1}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+func TestCancelStopsTheBackoff(t *testing.T) {
+	s := &scripted{steps: []func(context.Context) (bool, error){unavailable}}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := f.Authorise(ctx, "pay_1", payment.Money{Amount: 151, Currency: "GBP"}); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want a timeout", err)
-	}
-	f.TimeoutRate = 0
-	if approved, err := f.Authorise(context.Background(), "pay_1", payment.Money{Amount: 100, Currency: "GBP"}); err != nil || approved {
-		t.Fatalf("retry = %v, %v; want the recorded decline", approved, err)
+	start := time.Now()
+	_, err := Authorise(ctx, s, Policy{Attempts: 3, Timeout: time.Second, Backoff: 2 * time.Second}, "pay_1", payment.Money{Amount: 100, Currency: "GBP"})
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
+		t.Fatalf("err = %v after %s, want the caller's deadline within a second", err, time.Since(start))
 	}
 }

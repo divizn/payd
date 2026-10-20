@@ -25,18 +25,21 @@ func TestNewMoneyRejectsBadInput(t *testing.T) {
 			t.Errorf("NewMoney(%d, %q) = %v, want %v", tc.amount, tc.currency, err, tc.want)
 		}
 	}
+	if m, err := NewMoney(1, "JPY"); err != nil || m != (Money{1, "JPY"}) {
+		t.Errorf("NewMoney(1, JPY) = %v, %v", m, err)
+	}
 }
 
 func TestOnlyLegalTransitionsSucceed(t *testing.T) {
 	ops := map[string]struct {
-		legal map[Status]bool
+		legal map[Status]Status
 		apply func(*Payment) error
 	}{
-		"authorise": {map[Status]bool{StatusCreated: true}, (*Payment).Authorise},
-		"fail":      {map[Status]bool{StatusCreated: true}, (*Payment).Fail},
-		"void":      {map[Status]bool{StatusAuthorised: true}, (*Payment).Void},
-		"capture":   {map[Status]bool{StatusAuthorised: true}, func(p *Payment) error { return p.Capture(10) }},
-		"refund": {map[Status]bool{StatusCaptured: true, StatusPartiallyRefunded: true},
+		"authorise": {map[Status]Status{StatusCreated: StatusAuthorised}, (*Payment).Authorise},
+		"fail":      {map[Status]Status{StatusCreated: StatusFailed}, (*Payment).Fail},
+		"void":      {map[Status]Status{StatusAuthorised: StatusVoided}, (*Payment).Void},
+		"capture":   {map[Status]Status{StatusAuthorised: StatusCaptured}, func(p *Payment) error { return p.Capture(10) }},
+		"refund": {map[Status]Status{StatusCaptured: StatusPartiallyRefunded, StatusPartiallyRefunded: StatusPartiallyRefunded},
 			func(p *Payment) error { return p.Refund(1) }},
 	}
 	for name, op := range ops {
@@ -44,9 +47,9 @@ func TestOnlyLegalTransitionsSucceed(t *testing.T) {
 			p := Payment{Money: Money{100, "GBP"}, Status: s, CapturedAmount: 50, RefundedAmount: 10}
 			before := p
 			err := op.apply(&p)
-			if op.legal[s] {
-				if err != nil {
-					t.Errorf("%s from %s: unexpected error %v", name, s, err)
+			if want, ok := op.legal[s]; ok {
+				if err != nil || p.Status != want {
+					t.Errorf("%s from %s: status %s, err %v; want %s", name, s, p.Status, err, want)
 				}
 				continue
 			}
@@ -61,10 +64,10 @@ func TestOnlyLegalTransitionsSucceed(t *testing.T) {
 }
 
 func TestCaptureBounds(t *testing.T) {
-	for _, amount := range []int64{0, -5, 101} {
+	for amount, want := range map[int64]error{0: ErrInvalidAmount, -5: ErrInvalidAmount, 101: ErrExceedsAmount} {
 		p := Payment{Money: Money{100, "GBP"}, Status: StatusAuthorised}
-		if err := p.Capture(amount); err == nil {
-			t.Errorf("Capture(%d) of 100 succeeded", amount)
+		if err := p.Capture(amount); !errors.Is(err, want) {
+			t.Errorf("Capture(%d) of 100 = %v, want %v", amount, err, want)
 		}
 		if p.Status != StatusAuthorised || p.CapturedAmount != 0 {
 			t.Errorf("Capture(%d) changed payment on rejection: %+v", amount, p)

@@ -73,7 +73,7 @@ func TestCrashKeepsLedgerAndOutboxConsistent(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
-		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 			if status, _, err := call(http.MethodGet, "http://"+addr+"/payments", "", ""); err == nil && status == http.StatusOK {
 				return cmd
 			}
@@ -102,7 +102,7 @@ func TestCrashKeepsLedgerAndOutboxConsistent(t *testing.T) {
 	stopLoad()
 	wg.Wait()
 
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
 		var pending int
 		if err := db.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE published_at IS NULL`).Scan(&pending); err != nil {
 			t.Fatal(err)

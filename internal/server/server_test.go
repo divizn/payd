@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +25,7 @@ import (
 	"github.com/divizn/payd/internal/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -117,7 +121,8 @@ func (m merchant) do(t *testing.T, method, path, idemKey, body string) response 
 	t.Helper()
 	req, err := http.NewRequest(method, srv.URL+path, bytes.NewBufferString(body))
 	if err != nil {
-		t.Fatal(err)
+		t.Error(err)
+		return response{}
 	}
 	req.Header.Set("Authorization", "Bearer "+m.apiKey)
 	if idemKey != "" {
@@ -135,12 +140,30 @@ func (m merchant) do(t *testing.T, method, path, idemKey, body string) response 
 
 // doRetrying retries while the key is in flight, as a client following the API contract would
 func (m merchant) doRetrying(t *testing.T, method, path, idemKey, body string) response {
-	for {
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
 		r := m.do(t, method, path, idemKey, body)
 		if r.status != http.StatusConflict || r.code() != "idempotency_key_in_use" {
 			return r
 		}
 	}
+	t.Errorf("%s %s: key %q still in flight after 10s", method, path, idemKey)
+	return response{}
+}
+
+func checkLedger(t *testing.T) {
+	t.Helper()
+	if err := ledger.Check(context.Background(), db); err != nil {
+		t.Error(err)
+	}
+}
+
+func (m merchant) ledgerEntries(t *testing.T, paymentID string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(context.Background(), `SELECT count(*) FROM ledger_entries WHERE payment_id = $1`, paymentID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func (m merchant) payment(t *testing.T, path, key, body string, want int) paymentJSON {
@@ -212,6 +235,10 @@ func TestConcurrentDuplicateCaptureCapturesOnce(t *testing.T) {
 			t.Fatalf("caller %d got %d %s, caller 0 got %d %s", i, r.status, r.body, res[0].status, res[0].body)
 		}
 	}
+	if n := m.ledgerEntries(t, p.ID); n != 2 {
+		t.Fatalf("%d ledger entries after %d duplicate captures, want one pair", n, racers)
+	}
+	checkLedger(t)
 }
 
 func TestConcurrentCapturesWithDifferentKeysCaptureOnce(t *testing.T) {
@@ -233,6 +260,7 @@ func TestConcurrentCapturesWithDifferentKeysCaptureOnce(t *testing.T) {
 	if ok != 1 {
 		t.Fatalf("%d of %d captures succeeded, want 1", ok, racers)
 	}
+	checkLedger(t)
 }
 
 func TestConcurrentRefundsNeverExceedCapture(t *testing.T) {
@@ -245,8 +273,11 @@ func TestConcurrentRefundsNeverExceedCapture(t *testing.T) {
 	})
 	ok := 0
 	for _, r := range res {
-		if r.status == http.StatusOK {
+		switch {
+		case r.status == http.StatusOK:
 			ok++
+		case r.status != http.StatusUnprocessableEntity || r.code() != "invalid_amount":
+			t.Errorf("unexpected response %d %s", r.status, r.body)
 		}
 	}
 	var refunded int64
@@ -256,6 +287,7 @@ func TestConcurrentRefundsNeverExceedCapture(t *testing.T) {
 	if ok != 3 || refunded != 90 {
 		t.Fatalf("%d refunds of 30 succeeded against a capture of 100, refunded_amount=%d; want 3 and 90", ok, refunded)
 	}
+	checkLedger(t)
 }
 
 func TestReusedKeyWithDifferentBodyIsRejected(t *testing.T) {
@@ -403,10 +435,14 @@ func TestConcurrentAuthorisesCallTheAcquirerOnce(t *testing.T) {
 	ok := 0
 	var mu sync.Mutex
 	race(racers, func(i int) {
-		if r := m.do(t, http.MethodPost, "/payments/"+p.ID+"/authorise", fmt.Sprint("auth-", i), ""); r.status == http.StatusOK {
+		r := m.do(t, http.MethodPost, "/payments/"+p.ID+"/authorise", fmt.Sprint("auth-", i), "")
+		switch {
+		case r.status == http.StatusOK:
 			mu.Lock()
 			ok++
 			mu.Unlock()
+		case r.status != http.StatusConflict || r.code() != "illegal_transition":
+			t.Errorf("unexpected response %d %s", r.status, r.body)
 		}
 	})
 	if ok != 1 || acq.callsFor(p.ID) != 1 {
@@ -432,6 +468,94 @@ func TestMetricsLabelRoutesByPatternNotPath(t *testing.T) {
 	for _, id := range ids {
 		if bytes.Contains(body, []byte(id)) {
 			t.Fatalf("payment id %s leaked into a metric label", id)
+		}
+	}
+}
+
+func TestKeyIsScopedToThePath(t *testing.T) {
+	m := newMerchant(t)
+	p := m.authorised(t, 1000)
+	m.payment(t, "/payments/"+p.ID+"/capture", "k", "", http.StatusOK)
+	if r := m.do(t, http.MethodPost, "/payments/"+p.ID+"/refund", "k", ""); r.status != http.StatusUnprocessableEntity || r.code() != "idempotency_key_reused" {
+		t.Fatalf("refund reusing the capture's key = %d %s, want 422 idempotency_key_reused", r.status, r.body)
+	}
+	if got := m.payment(t, "/payments/"+p.ID+"/refund", uuid.NewString(), `{"amount":1}`, http.StatusOK); got.RefundedAmount != 1 {
+		t.Fatalf("refunded %d, want only the 1 from the fresh key", got.RefundedAmount)
+	}
+}
+
+func TestKeysAreScopedToTheMerchant(t *testing.T) {
+	a, b := newMerchant(t), newMerchant(t)
+	pa := a.payment(t, "/payments", "shared", `{"amount":1000,"currency":"GBP"}`, http.StatusCreated)
+	pb := b.payment(t, "/payments", "shared", `{"amount":1000,"currency":"GBP"}`, http.StatusCreated)
+	if pa.ID == pb.ID || pb.MerchantID != b.id {
+		t.Fatalf("merchant b got %+v from a key merchant a used", pb)
+	}
+}
+
+func TestKeyInFlightReturns409(t *testing.T) {
+	m := newMerchant(t)
+	ctx := context.Background()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	lockID := sha256.Sum256([]byte(m.id + "\x00" + "busy"))
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(binary.BigEndian.Uint64(lockID[:8]))); err != nil {
+		t.Fatal(err)
+	}
+	if r := m.do(t, http.MethodPost, "/payments", "busy", `{"amount":1000,"currency":"GBP"}`); r.status != http.StatusConflict || r.code() != "idempotency_key_in_use" {
+		t.Fatalf("request while the key is held = %d %s, want 409 idempotency_key_in_use", r.status, r.body)
+	}
+	tx.Rollback(ctx)
+	m.payment(t, "/payments", "busy", `{"amount":1000,"currency":"GBP"}`, http.StatusCreated)
+}
+
+func TestMalformedRequestsAreRejected(t *testing.T) {
+	m := newMerchant(t)
+	p := m.authorised(t, 1000)
+	capture := "/payments/" + p.ID + "/capture"
+	for _, tc := range []struct {
+		name, path, key, body string
+		status                int
+		code                  string
+	}{
+		{"key over 255 bytes", "/payments", strings.Repeat("k", 256), `{"amount":1,"currency":"GBP"}`, 400, "idempotency_key_required"},
+		{"key not utf-8", "/payments", "\xff", `{"amount":1,"currency":"GBP"}`, 400, "idempotency_key_required"},
+		{"invalid json", "/payments", "", `{"amount":`, 400, "invalid_json"},
+		{"trailing data", "/payments", "", `{"amount":1,"currency":"GBP"} {}`, 400, "invalid_json"},
+		{"unknown field", "/payments", "", `{"amount":1,"currency":"GBP","amonut":2}`, 400, "invalid_json"},
+		{"body over 1MiB", "/payments", "", `{"currency":"` + strings.Repeat("x", 1<<20) + `"}`, 413, "body_too_large"},
+		{"null amount", capture, "", `{"amount":null}`, 422, "invalid_amount"},
+		{"fractional amount", capture, "", `{"amount":1.5}`, 422, "invalid_amount"},
+		{"uppercase id", "/payments/" + strings.ToUpper(p.ID) + "/capture", "", "", 404, "not_found"},
+	} {
+		key := tc.key
+		if key == "" {
+			key = uuid.NewString()
+		}
+		if r := m.do(t, http.MethodPost, tc.path, key, tc.body); r.status != tc.status || r.code() != tc.code {
+			t.Errorf("%s: got %d %s, want %d %s", tc.name, r.status, r.body, tc.status, tc.code)
+		}
+	}
+	if n := m.countPayments(t); n != 1 {
+		t.Errorf("%d payments after rejected creates, want 1", n)
+	}
+	if got := m.payment(t, capture, uuid.NewString(), "", http.StatusOK); got.CapturedAmount != 1000 {
+		t.Errorf("payment changed by a rejected capture: %+v", got)
+	}
+}
+
+func TestSchemaRejectsImpossibleAmounts(t *testing.T) {
+	m := newMerchant(t)
+	p := m.authorised(t, 1000)
+	m.payment(t, "/payments/"+p.ID+"/capture", uuid.NewString(), `{"amount":100}`, http.StatusOK)
+	for _, set := range []string{"captured_amount = 1001", "refunded_amount = 101", "refunded_amount = -1", "amount = 0"} {
+		var pgErr *pgconn.PgError
+		_, err := db.Exec(context.Background(), `UPDATE payments SET `+set+` WHERE id = $1`, p.ID)
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+			t.Errorf("SET %s: err = %v, want a check violation", set, err)
 		}
 	}
 }
