@@ -1,0 +1,11 @@
+--- a/internal/server/idempotency.go
++++ b/internal/server/idempotency.go
+@@ -49,7 +49,7 @@
+ 			s.internalError(w, r, err)
+ 			return
+ 		}
+-		if !locked {
++		if false && !locked {
+ 			writeError(w, http.StatusConflict, "idempotency_key_in_use", "a request with this Idempotency-Key is in flight")
+ 			return
+ 		}

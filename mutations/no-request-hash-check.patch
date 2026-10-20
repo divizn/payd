@@ -1,0 +1,11 @@
+--- a/internal/server/idempotency.go
++++ b/internal/server/idempotency.go
+@@ -63,7 +63,7 @@
+ 		err = tx.QueryRow(ctx, `SELECT request_hash, response_status, response_body FROM idempotency_keys WHERE merchant_id = $1 AND key = $2`, merchant, key).
+ 			Scan(&storedHash, &storedStatus, &storedBody)
+ 		switch {
+-		case err == nil && !bytes.Equal(storedHash, reqHash):
++		case err == nil && !bytes.Equal(storedHash, storedHash):
+ 			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_reused", "Idempotency-Key was used with a different request")
+ 			return
+ 		case err == nil:

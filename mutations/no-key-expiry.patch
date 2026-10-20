@@ -1,0 +1,11 @@
+--- a/internal/server/idempotency.go
++++ b/internal/server/idempotency.go
+@@ -54,7 +54,7 @@
+ 			return
+ 		}
+ 
+-		if _, err := tx.Exec(ctx, `DELETE FROM idempotency_keys WHERE merchant_id = $1 AND key = $2 AND created_at <= now() - interval '24 hours'`, merchant, key); err != nil {
++		if _, err := tx.Exec(ctx, `DELETE FROM idempotency_keys WHERE merchant_id = $1 AND key = $2 AND false`, merchant, key); err != nil {
+ 			s.internalError(w, r, err)
+ 			return
+ 		}

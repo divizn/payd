@@ -1,0 +1,11 @@
+--- a/internal/server/server.go
++++ b/internal/server/server.go
+@@ -128,7 +128,7 @@
+ 		if err != nil {
+ 			return errorBody(http.StatusNotFound, "not_found", "payment not found")
+ 		}
+-		p, err := scanPayment(tx.QueryRow(ctx, `SELECT `+paymentCols+` FROM payments WHERE id = $1 AND merchant_id = $2 FOR UPDATE`, id, merchant))
++		p, err := scanPayment(tx.QueryRow(ctx, `SELECT `+paymentCols+` FROM payments WHERE id = $1 AND merchant_id = $2`, id, merchant))
+ 		if errors.Is(err, pgx.ErrNoRows) {
+ 			return errorBody(http.StatusNotFound, "not_found", "payment not found")
+ 		}

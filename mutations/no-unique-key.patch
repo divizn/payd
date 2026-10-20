@@ -1,0 +1,23 @@
+--- a/internal/server/idempotency.go
++++ b/internal/server/idempotency.go
+@@ -49,7 +49,7 @@
+ 			s.internalError(w, r, err)
+ 			return
+ 		}
+-		if !locked {
++		if false && !locked {
+ 			writeError(w, http.StatusConflict, "idempotency_key_in_use", "a request with this Idempotency-Key is in flight")
+ 			return
+ 		}
+--- a/migrations/00002_create_api_and_idempotency_keys.sql
++++ b/migrations/00002_create_api_and_idempotency_keys.sql
+@@ -10,8 +10,7 @@
+     request_hash    bytea NOT NULL,
+     response_status int NOT NULL,
+     response_body   bytea NOT NULL,
+-    created_at      timestamptz NOT NULL DEFAULT now(),
+-    PRIMARY KEY (merchant_id, key)
++    created_at      timestamptz NOT NULL DEFAULT now()
+ );
+ 
+ -- +goose Down
