@@ -413,3 +413,25 @@ func TestConcurrentAuthorisesCallTheAcquirerOnce(t *testing.T) {
 		t.Fatalf("%d authorises succeeded and the acquirer was called %d times, want 1 and 1", ok, acq.callsFor(p.ID))
 	}
 }
+
+func TestMetricsLabelRoutesByPatternNotPath(t *testing.T) {
+	m := newMerchant(t)
+	ids := []string{uuid.NewString(), uuid.NewString()}
+	for _, id := range ids {
+		m.do(t, http.MethodGet, "/payments/"+id, "", "")
+	}
+	r, err := srv.Client().Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	body, _ := io.ReadAll(r.Body)
+	if !bytes.Contains(body, []byte(`payd_http_request_duration_seconds_count{route="GET /payments/{id}",status="404"}`)) {
+		t.Fatal("no series for the GET /payments/{id} pattern in /metrics")
+	}
+	for _, id := range ids {
+		if bytes.Contains(body, []byte(id)) {
+			t.Fatalf("payment id %s leaked into a metric label", id)
+		}
+	}
+}

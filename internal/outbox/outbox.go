@@ -8,9 +8,16 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 const batchSize = 100
+
+var published = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "payd_outbox_events_published_total",
+	Help: "Outbox events published, including redeliveries after a crash.",
+})
 
 type Event struct {
 	ID        int64           `json:"id"`
@@ -43,6 +50,9 @@ func (r Relay) Run(ctx context.Context) {
 		n, err := r.publishBatch(ctx)
 		if err != nil && ctx.Err() == nil {
 			r.Log.ErrorContext(ctx, "outbox relay", "err", err)
+		}
+		if err == nil {
+			published.Add(float64(n))
 		}
 		if err == nil && n == batchSize {
 			continue

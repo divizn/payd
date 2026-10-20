@@ -46,7 +46,7 @@ func New(db *pgxpool.Pool, log *slog.Logger, acq acquirer.Acquirer, policy acqui
 	})))
 	mux.HandleFunc("GET /payments/{id}", s.get)
 	mux.HandleFunc("GET /payments", s.list)
-	return s.auth(mux)
+	return withMetrics(s.auth(instrument(mux)), db)
 }
 
 type merchantKey struct{}
